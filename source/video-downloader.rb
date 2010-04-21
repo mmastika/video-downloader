@@ -3,6 +3,7 @@
 require 'net/http'
 require 'uri'
 require 'cgi'
+require 'optparse'
 
 def report_progress(start, now, bytes, f_len)
 	f_len_str = FileDownloader::bytes_siunit(f_len)
@@ -38,6 +39,15 @@ class FDException < Exception
 end
 
 class FileDownloader
+	@@default_config = {
+		:directory	=> './',
+		:verbose	=> false
+	}
+	def initialize(config)
+		@config = @@default_config.merge(config)
+		@listeners = []
+	end
+
 	def self.bytes_siunit(length)
 		suffix = ' KMGTPEZY'
 		exp = (Math.log(length) / Math.log(1024.0)).floor
@@ -48,11 +58,19 @@ class FileDownloader
 
 	def download_file(info_extractor, &p)
 		video_info = info_extractor.info
-		f_name = video_info[:video_title]
-		download_file_r(video_info[:video_url], video_info[:video_title], &p)
+		f_name = @config[:directory] + video_info[:video_title]
+		download_file_r(video_info[:video_url], f_name, &p)
+	end
+
+	def on_message_update(&listener)
+		@listeners << listener
 	end
 
 	private
+	def update_message(message)
+		@listeners.each { |listener| listener.call(message) } if @config[:verbose]
+	end
+
 	def download_file_r(url, f_name, &p)
 		f_length = counter = 0
 		start_t = Time.now
@@ -89,7 +107,7 @@ class FileDownloader
 		}
 
 		if counter > 0 then
-			puts "Resuming download at #{FileDownloader::bytes_siunit(counter)}"
+			update_message("Resuming download at #{FileDownloader::bytes_siunit(counter)}")
 			request_get(url, {'Range' => "bytes=#{counter}-"}) do |response|
 				p_dl.call(response) do |start, now, bytes, length|
 					yield start, now, bytes, length
@@ -98,7 +116,7 @@ class FileDownloader
 		end
 
 		if !success
-			puts "Unable to resume download: #{response.message}, re-downloading file..." unless counter == 0
+			update_message("Unable to resume download: #{response.message}, re-downloading file...") unless counter == 0
 			request_get(url, nil) do |response|
 				counter = 0
 				f_mode = 'w+'
@@ -129,7 +147,7 @@ class FileDownloader
 				end
 			end
 			if redirected then
-				puts "Redirecting to: #{url}"
+				update_message("Redirecting to: #{url}")
 				return request_get(url, header, limit - 1, &p)
 			end
 			response
@@ -262,29 +280,51 @@ class YouTubeIE < InfoExtractor
 end
 
 # Main function
-if __FILE__ == $0 then
+if __FILE__ == $0 then	
+		options = {}
+		optparse = OptionParser.new do |option|
+			option.banner = 'Usage: video-downloader.rb [options] link1 link2 ...'
+			
+			option.on('-d', '--directory DIRECTORY', 'Director where the video will be saved') do |dir|
+				dir = dir.end_with?('/') ? dir : dir + '/'
+				options[:directory] = dir
+			end
+
+			option.on_tail('-v', '--[no-]verbose', 'Output more information') do |v|
+				options[:verbose] = v
+			end
+
+			option.on_tail('-h', '--help', 'Display this screen') do
+				puts option
+			end
+		end
 	if ARGV.size < 1
-		puts 'usage flash_downloader.rb <url>'
+		puts optparse.help
 	else
+		optparse.parse!
 		extractors = Array.new
 		ARGV.each do |arg|
 			if YouTubeIE::valid_url?(arg) then
 				extractors << YouTubeIE.new(arg)
 			end
 		end
-		downloader = FileDownloader.new
+
+		downloader = FileDownloader.new(options)
+		downloader.on_message_update do |message|
+			puts message
+		end
 		extractors.each do |ie|
 			begin
 				ie.pretty_info.sort.each do |key, value|
 					puts "%-20s : %s" % [key, value]
-				end
+				end if options[:verbose]
 				downloader.download_file(ie) do | start, now, bytes, length |
 					report_progress(start, now, bytes, length)
 				end
 			rescue Exception => ex
 				puts ex.message
 			end
-			puts "\n\n"
+			puts "#{options[:verbose] ? '\n\n' : '\n'}"
 		end
 	end
 end
